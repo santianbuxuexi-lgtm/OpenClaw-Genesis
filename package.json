@@ -1,0 +1,20 @@
+{
+  "name": "openclaw-genesis",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "bin": {
+    "openclaw-genesis": "./openclaw-genesis.mjs",
+    "openclaw-genesis-heartbeat": "./openclaw-genesis-heartbeat.mjs"
+  },
+  "files": [
+    "openclaw-genesis.mjs",
+    "openclaw-genesis-bootstrap.mjs",
+    "openclaw-genesis-heartbeat.mjs",
+    "src",
+    "scripts",
+    "docs",
+    "LICENSE",
+    "README.md"
+  ]
+}

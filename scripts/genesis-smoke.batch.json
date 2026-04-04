@@ -1,0 +1,17 @@
+[
+  { "path": "genesis.runtimeProfile", "value": "lab" },
+  { "path": "genesis.hostAllowlist", "value": ["builder", "scout"] },
+  { "path": "genesis.enableLifecycleWriteback", "value": true },
+  { "path": "gateway.mode", "value": "local" },
+  { "path": "gateway.bind", "value": "loopback" },
+  { "path": "gateway.port", "value": 19101 },
+  { "path": "agents.defaults.sandbox.mode", "value": "all" },
+  {
+    "path": "agents.list",
+    "value": [
+      { "id": "main", "default": true },
+      { "id": "builder" },
+      { "id": "creator" }
+    ]
+  }
+]
