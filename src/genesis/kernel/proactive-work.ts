@@ -2,10 +2,13 @@ import fs from "node:fs";
 import path from "node:path";
 import {
   readJsonFileSync,
+  readGenesisWorldStateSync,
   resolveGenesisProactiveWorkLogPath,
   resolveGenesisProactiveWorkSummaryPath,
+  resolveGenesisStateDir,
   type GenesisProactiveWorkEntry,
   type GenesisProactiveWorkSummary,
+  type GenesisLineageRecord,
   type GenesisPlatformAccountRecord,
   type GenesisPlatformCapability,
   type GenesisSkillCapabilitySummary,
@@ -66,8 +69,8 @@ function resolveExternalExecutionSlotKey(ts: number, slotHours = 2): string {
 }
 
 const EXTERNAL_WORK_STALE_MS = 90 * 60 * 1000;
-const GENERIC_FOUNDER_WORK_STALE_MS = 6 * 60 * 60 * 1000;
-const GENERIC_FOUNDER_WORK_FORCE_RECLAIM_MS = 24 * 60 * 60 * 1000;
+const GENERIC_FOUNDER_WORK_STALE_MS = 2 * 60 * 60 * 1000;
+const GENERIC_FOUNDER_WORK_FORCE_RECLAIM_MS = 8 * 60 * 60 * 1000;
 
 function readJsonLinesSync<T>(filePath: string): T[] {
   try {
@@ -1309,6 +1312,54 @@ function resolveGenesisPreferredPlatforms(
   return preferred;
 }
 
+function resolveGenesisPreferredPlatformsNormalized(
+  intentSummary?: GenesisSocietySummary["userIntentSummary"] | null,
+  loginSummary?: GenesisSocietySummary["loginStatePoolSummary"] | null,
+): string[] {
+  const fallback = resolveGenesisPreferredPlatforms(intentSummary, loginSummary);
+  const text = normalizeGenesisIntentText(intentSummary);
+  const preferred = [...fallback];
+  const pushUnique = (platform: string): void => {
+    if (!preferred.includes(platform)) {
+      preferred.push(platform);
+    }
+  };
+  if (/头条|微头条|toutiao/.test(text)) {
+    pushUnique("toutiao");
+  }
+  if (/微博|weibo/.test(text)) {
+    pushUnique("weibo");
+  }
+  if (/抖音|douyin/.test(text)) {
+    pushUnique("douyin");
+  }
+  if (/telegram/.test(text)) {
+    pushUnique("telegram");
+  }
+  if (/github|gist/.test(text)) {
+    pushUnique("github");
+  }
+  return preferred;
+}
+
+function resolveGenesisIntentNeedOverrides(text: string): {
+  publish: boolean;
+  browse: boolean;
+  audit: boolean;
+  coordinate: boolean;
+  automate: boolean;
+} {
+  return {
+    publish: /发布|发帖|微博|微头条|文案|标题|内容|成文|publish|post|headline|thread|content/.test(text),
+    browse: /搜索|查询|检索|研究|局势|情报|信号|热点|趋势|search|query|research|signal|monitor|trend|news/.test(
+      text,
+    ),
+    audit: /核实|审计|事实|风险|漏洞|补丁|verify|audit|fact|risk|patch|policy|sanction/.test(text),
+    coordinate: /协调|分发|渠道|平台|路由|route|channel|coordinate|distribution|audience/.test(text),
+    automate: /skill|工具|工作流|自动化|插件|执行器|automation|tool|workflow|executor/.test(text),
+  };
+}
+
 function resolveGenesisExternalExecutionContext(params: {
   intentSummary?: GenesisSocietySummary["userIntentSummary"] | null;
   skillSummary?: GenesisSkillCapabilitySummary | null;
@@ -1317,7 +1368,10 @@ function resolveGenesisExternalExecutionContext(params: {
   recentOutcomes?: GenesisProactiveWorkEntry[];
 }): GenesisExternalExecutionContext {
   const text = normalizeGenesisIntentText(params.intentSummary);
-  const preferredPlatforms = resolveGenesisPreferredPlatforms(params.intentSummary, params.loginSummary);
+  const preferredPlatforms = resolveGenesisPreferredPlatformsNormalized(
+    params.intentSummary,
+    params.loginSummary,
+  );
   const hasReadyPlatform = (params.loginSummary?.platformLeaders ?? []).some((entry) => entry.readyCount > 0);
   const scoutHotspot = resolveRecentScoutHotspot({
     recentOutcomes: params.recentOutcomes,
@@ -1352,10 +1406,16 @@ function resolveGenesisExternalExecutionContext(params: {
   const needsAutomate =
     /skill|工具|工作流|自动化|插件|执行器|automation|tool|workflow|executor/.test(text) ||
     ((params.skillSummary?.degradedSkillCount ?? 0) > 0 && needsPublish);
-  const effectiveNeedsBrowse = needsBrowse || autonomousCycle;
-  const effectiveNeedsAudit = needsAudit;
-  const effectiveNeedsCoordinate = needsCoordinate;
-  const effectiveNeedsAutomate = needsAutomate || (autonomousCycle && (params.skillSummary?.degradedSkillCount ?? 0) > 0);
+  const normalizedNeeds = resolveGenesisIntentNeedOverrides(text);
+  const effectiveNeedsPublish = needsPublish || normalizedNeeds.publish;
+  const effectiveNeedsBrowse = needsBrowse || normalizedNeeds.browse || autonomousCycle;
+  const effectiveNeedsAudit = needsAudit || normalizedNeeds.audit;
+  const effectiveNeedsCoordinate =
+    needsCoordinate || normalizedNeeds.coordinate || preferredPlatforms.length > 1;
+  const effectiveNeedsAutomate =
+    needsAutomate ||
+    normalizedNeeds.automate ||
+    (autonomousCycle && (params.skillSummary?.degradedSkillCount ?? 0) > 0);
   return {
     objective: objective.objective,
     objectiveSource: objective.source,
@@ -1371,7 +1431,7 @@ function resolveGenesisExternalExecutionContext(params: {
     scoutHotspotUrl: scoutHotspot?.url,
     scoutHotspotSkill: scoutHotspot?.usedSkillName,
     needs: {
-      publish: needsPublish,
+      publish: effectiveNeedsPublish,
       browse: effectiveNeedsBrowse,
       audit: effectiveNeedsAudit,
       coordinate: effectiveNeedsCoordinate,
@@ -1455,6 +1515,149 @@ function resolveExternalExecutionCandidatePlatforms(params: {
     ordered.push(params.preference.platform);
   }
   return ordered;
+}
+
+type GenesisLineageExternalExecutionCandidate = {
+  lineageId: string;
+  founderOrigin: GenesisFounderOrigin;
+  latestSessionKey: string;
+  depth: number;
+  score: number;
+  updatedAt: number;
+};
+
+function resolveFounderOriginFromLineageRecord(
+  lineage: GenesisLineageRecord,
+): GenesisFounderOrigin | null {
+  const normalized = `${lineage.specialtyOrigin ?? lineage.lineageId}`.trim().toLowerCase();
+  if (!normalized) {
+    return null;
+  }
+  for (const founderOrigin of KNOWN_FOUNDERS) {
+    if (
+      normalized === founderOrigin ||
+      normalized.startsWith(`${founderOrigin}::`) ||
+      normalized.startsWith(`${founderOrigin}_`) ||
+      normalized.startsWith(`${founderOrigin}-`) ||
+      normalized.startsWith(`agent:${founderOrigin}:`)
+    ) {
+      return founderOrigin;
+    }
+  }
+  return null;
+}
+
+function resolveLineageDepthFromMap(
+  lineageId: string,
+  recordsById: Map<string, GenesisLineageRecord>,
+): number {
+  let depth = 0;
+  let current = recordsById.get(lineageId);
+  const visited = new Set<string>();
+  while (current?.parentLineageId) {
+    const parentLineageId = current.parentLineageId.trim();
+    if (!parentLineageId || visited.has(parentLineageId)) {
+      break;
+    }
+    visited.add(parentLineageId);
+    depth += 1;
+    current = recordsById.get(parentLineageId);
+  }
+  return depth;
+}
+
+function readGenesisLineageRecordsSync(env: NodeJS.ProcessEnv): GenesisLineageRecord[] {
+  const lineagesDir = path.join(resolveGenesisStateDir(env), "lineages");
+  let fileNames: string[];
+  try {
+    fileNames = fs.readdirSync(lineagesDir);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return [];
+    }
+    throw error;
+  }
+  return fileNames
+    .filter((fileName) => fileName.endsWith(".json"))
+    .map((fileName) =>
+      readJsonFileSync<GenesisLineageRecord>(path.join(lineagesDir, fileName)),
+    )
+    .filter((record): record is GenesisLineageRecord => Boolean(record?.lineageId && record.latestSessionKey));
+}
+
+function resolveChildLineageExternalExecutionCandidatesSync(params: {
+  env: NodeJS.ProcessEnv;
+  context: GenesisExternalExecutionContext;
+  world: ReturnType<typeof readGenesisWorldStateSync>;
+  ts: number;
+}): GenesisLineageExternalExecutionCandidate[] {
+  const records = readGenesisLineageRecordsSync(params.env);
+  if (records.length === 0) {
+    return [];
+  }
+  const recordsById = new Map(records.map((record) => [record.lineageId, record] as const));
+  const pressure = Math.max(0, params.world?.currentPressure ?? 0);
+  const replicationBoost = Math.max(0, params.world?.replicationBoost ?? 0);
+  const stormMomentum = Math.max(0, params.world?.stormMomentum ?? 0);
+  const ranked = records
+    .map((record) => {
+      if (!record.parentLineageId?.trim()) {
+        return null;
+      }
+      if (record.ecologyState === "dormant" || record.ecologyState === "extinct") {
+        return null;
+      }
+      const founderOrigin = resolveFounderOriginFromLineageRecord(record);
+      if (!founderOrigin) {
+        return null;
+      }
+      const depth = resolveLineageDepthFromMap(record.lineageId, recordsById);
+      if (depth <= 0) {
+        return null;
+      }
+      if ((record.completionCount ?? 0) <= 0 && depth < 2) {
+        return null;
+      }
+      const lineageValue =
+        Math.max(0, record.publicValue) +
+        Math.max(0, record.survivalCredit) +
+        Math.max(0, record.expansionCredit);
+      const completionScore = Math.max(0, record.completionCount ?? 0) * 0.35;
+      const depthScore = depth * 0.55;
+      const recencyMs = Math.max(0, params.ts - (record.updatedAt ?? params.ts));
+      const recencyScore = Math.max(0, 1 - recencyMs / (4 * 60 * 60 * 1000));
+      const superpowerScore = record.superpowerInherited ? 0.35 : 0;
+      const score =
+        lineageValue +
+        completionScore +
+        depthScore +
+        recencyScore +
+        pressure * 0.25 +
+        replicationBoost * 0.4 +
+        stormMomentum * 0.18 +
+        superpowerScore;
+      return {
+        lineageId: record.lineageId,
+        founderOrigin,
+        latestSessionKey: record.latestSessionKey,
+        depth,
+        score,
+        updatedAt: record.updatedAt ?? params.ts,
+      } satisfies GenesisLineageExternalExecutionCandidate;
+    })
+    .filter((candidate): candidate is GenesisLineageExternalExecutionCandidate => Boolean(candidate))
+    .sort((left, right) => right.score - left.score || right.updatedAt - left.updatedAt);
+  const limit = Math.max(
+    2,
+    Math.min(
+      8,
+      3 +
+        (params.context.needs.publish ? 2 : 0) +
+        (pressure >= 0.95 ? 1 : 0) +
+        (replicationBoost >= 1.1 ? 1 : 0),
+    ),
+  );
+  return ranked.slice(0, limit);
 }
 
 export function buildGenesisProactiveWorkTask(params: {
@@ -1892,6 +2095,7 @@ export function ensureGenesisExternalExecutionEntriesSync(params?: {
   const intentSummary = params?.intentSummary ?? readGenesisUserIntentSummarySnapshotSync(env);
   const skillSummary = params?.skillSummary ?? null;
   const loginSummary = params?.loginSummary ?? readGenesisLoginStatePoolSummarySync(env);
+  const world = readGenesisWorldStateSync(env);
   const eventSummary = readGenesisEventLogSummarySnapshotSync(env);
   const recentOutcomes = latestEntries.filter((entry) => entry.status === "completed").slice(0, 8);
   const context = resolveGenesisExternalExecutionContext({
@@ -1901,6 +2105,153 @@ export function ensureGenesisExternalExecutionEntriesSync(params?: {
     eventSummary,
     recentOutcomes,
   });
+  const reservedWorkIds = new Set<string>();
+
+  const tryScheduleExternalEntry = (input: {
+    workId: string;
+    founderOrigin: GenesisFounderOrigin;
+    lineageId: string;
+    sessionKey: string;
+    requestedBy: string;
+    preference: { capability: GenesisPlatformCapability; platform?: string; score: number };
+    candidatePlatform?: string;
+    lineageDepth?: number;
+  }): void => {
+    if (reservedWorkIds.has(input.workId)) {
+      return;
+    }
+    const account = acquireGenesisPlatformAccountSync({
+      capability: input.preference.capability,
+      platform: input.candidatePlatform,
+      requestedBy: input.requestedBy,
+      currentTask: `${input.lineageId}:${input.preference.capability}:${context.objective}`,
+      env,
+    });
+    if (!account) {
+      return;
+    }
+    const objective =
+      (input.lineageDepth ?? 0) > 0
+        ? `${context.objective} | lineage:${input.lineageId} depth:${input.lineageDepth} close with concrete public evidence`
+        : context.objective;
+    const task = buildGenesisFounderExternalExecutionTask({
+      founderOrigin: input.founderOrigin,
+      account,
+      objective,
+      capability: input.preference.capability,
+      hotspotTitle: context.scoutHotspotTitle,
+      hotspotUrl: context.scoutHotspotUrl,
+    });
+    const provisionalEntry: GenesisProactiveWorkEntry = {
+      workId: input.workId,
+      founderOrigin: input.founderOrigin,
+      agentId: input.founderOrigin,
+      lineageId: input.lineageId,
+      sessionKey: input.sessionKey,
+      platform: account.platform,
+      accountRecordId: account.recordId,
+      accountLabel: account.accountLabel,
+      action: "assist",
+      climateKind: "external-execution",
+      workType: task.workType,
+      task: task.task,
+      status: "planned",
+      driverKind: context.objectiveSource === "intent" ? "history" : context.objectiveSource,
+      driverHistoryKind: context.driverHistoryKind ?? null,
+      driverTopicCluster: context.driverTopicCluster ?? null,
+      driverKeywords: context.driverKeywords,
+      driverSummary:
+        (input.lineageDepth ?? 0) > 0
+          ? `${context.driverSummary} | lineage:${input.lineageId} | generation:${input.lineageDepth}`
+          : context.driverSummary,
+      hotspotTitle: context.scoutHotspotTitle,
+      hotspotUrl: context.scoutHotspotUrl,
+      artifactLabel: task.artifactLabel,
+      source: "workflow_dispatch",
+      ts,
+      updatedAt: ts,
+    };
+    const trafficFingerprint = buildGenesisTrafficFingerprint(provisionalEntry);
+    const nextEntry: GenesisProactiveWorkEntry = {
+      ...provisionalEntry,
+      trafficFingerprint: trafficFingerprint ?? undefined,
+    };
+    const blockingEntries = latestEntries.filter(
+      (entry) =>
+        entry.workId === input.workId ||
+        (entry.status !== "completed" &&
+          entry.platform === account.platform &&
+          entry.workType.startsWith("external_") &&
+          ts - (entry.updatedAt ?? entry.ts ?? 0) < EXTERNAL_WORK_STALE_MS &&
+          (entry.lineageId === input.lineageId ||
+            (input.lineageId === input.founderOrigin && entry.founderOrigin === input.founderOrigin))),
+    );
+    if (
+      blockingEntries.some(
+        (entry) =>
+          !shouldReplaceExistingExternalTask({
+            existingEntry: entry,
+            nextEntry,
+            ts,
+          }),
+      )
+    ) {
+      releaseGenesisPlatformAccountSync({
+        recordId: account.recordId,
+        lastOutcome: `deferred_existing_task:${trafficFingerprint ?? "none"}`,
+        env,
+      });
+      return;
+    }
+    for (const existingEntry of blockingEntries) {
+      if (
+        shouldReplaceExistingExternalTask({
+          existingEntry,
+          nextEntry,
+          ts,
+        })
+      ) {
+        appendGenesisProactiveWorkEntrySync(
+          {
+            ...existingEntry,
+            status: "completed",
+            resultPreview:
+              existingEntry.resultPreview ??
+              `Superseded by a newer hotspot-driven task with stronger driver signal.`,
+            effectType: existingEntry.effectType ?? "report",
+            effectEvidence:
+              existingEntry.effectEvidence ??
+              `superseded_by:${input.workId}`,
+            externalStatus: existingEntry.externalStatus ?? "pending",
+            externalEvidenceType: existingEntry.externalEvidenceType ?? "text",
+            externalEvidenceValue:
+              existingEntry.externalEvidenceValue ??
+              `superseded_by:${input.workId}`,
+            updatedAt: ts,
+          },
+          env,
+        );
+      }
+    }
+    if (
+      task.workType === "external_publish" &&
+      wasGenesisTrafficPublishedRecentlySync({
+        platform: account.platform,
+        fingerprint: trafficFingerprint,
+        env,
+      })
+    ) {
+      releaseGenesisPlatformAccountSync({
+        recordId: account.recordId,
+        lastOutcome: `duplicate_skipped:${trafficFingerprint ?? "none"}`,
+        env,
+      });
+      return;
+    }
+    appendGenesisProactiveWorkEntrySync(nextEntry, env);
+    reservedWorkIds.add(input.workId);
+  };
+
   const externalExecutionOrder = ([
     "creator",
     "scout",
@@ -1937,130 +2288,53 @@ export function ensureGenesisExternalExecutionEntriesSync(params?: {
     });
     for (const candidatePlatform of candidatePlatforms) {
       const workId = `account:${slotKey}:${founderOrigin}:${candidatePlatform ?? "any"}:${preference.capability}`;
-      const account = acquireGenesisPlatformAccountSync({
-        capability: preference.capability,
-        platform: candidatePlatform,
-        requestedBy: founderOrigin,
-        currentTask: `${founderOrigin}:${preference.capability}:${context.objective}`,
-        env,
-      });
-      if (!account) {
-        continue;
-      }
-      const task = buildGenesisFounderExternalExecutionTask({
-        founderOrigin,
-        account,
-        objective: context.objective,
-        capability: preference.capability,
-        hotspotTitle: context.scoutHotspotTitle,
-        hotspotUrl: context.scoutHotspotUrl,
-      });
-      const provisionalEntry: GenesisProactiveWorkEntry = {
+      tryScheduleExternalEntry({
         workId,
         founderOrigin,
-        agentId: founderOrigin,
         lineageId: founderOrigin,
         sessionKey: `agent:${founderOrigin}:main`,
-        platform: account.platform,
-        accountRecordId: account.recordId,
-        accountLabel: account.accountLabel,
-        action: "assist",
-        climateKind: "external-execution",
-        workType: task.workType,
-        task: task.task,
-        status: "planned",
-        driverKind: context.objectiveSource === "intent" ? "history" : context.objectiveSource,
-        driverHistoryKind: context.driverHistoryKind ?? null,
-        driverTopicCluster: context.driverTopicCluster ?? null,
-        driverKeywords: context.driverKeywords,
-        driverSummary: context.driverSummary,
-        hotspotTitle: context.scoutHotspotTitle,
-        hotspotUrl: context.scoutHotspotUrl,
-        artifactLabel: task.artifactLabel,
-        source: "workflow_dispatch",
-        ts,
-        updatedAt: ts,
-      };
-      const trafficFingerprint = buildGenesisTrafficFingerprint(provisionalEntry);
-      const nextEntry: GenesisProactiveWorkEntry = {
-        ...provisionalEntry,
-        trafficFingerprint: trafficFingerprint ?? undefined,
-      };
-      const blockingEntries = latestEntries.filter(
-        (entry) =>
-          entry.workId === workId ||
-          (entry.status !== "completed" &&
-            entry.founderOrigin === founderOrigin &&
-            entry.platform === account.platform &&
-            entry.workType.startsWith("external_") &&
-            ts - (entry.updatedAt ?? entry.ts ?? 0) < EXTERNAL_WORK_STALE_MS),
-      );
-      if (
-        blockingEntries.some(
-          (entry) =>
-            !shouldReplaceExistingExternalTask({
-              existingEntry: entry,
-              nextEntry,
-              ts,
-            }),
-        )
-      ) {
-        releaseGenesisPlatformAccountSync({
-          recordId: account.recordId,
-          lastOutcome: `deferred_existing_task:${trafficFingerprint ?? "none"}`,
-          env,
-        });
-        continue;
-      }
-      for (const existingEntry of blockingEntries) {
-        if (
-          shouldReplaceExistingExternalTask({
-            existingEntry,
-            nextEntry,
-            ts,
-          })
-        ) {
-          appendGenesisProactiveWorkEntrySync(
-            {
-              ...existingEntry,
-              status: "completed",
-              resultPreview:
-                existingEntry.resultPreview ??
-                `Superseded by a newer hotspot-driven task with stronger driver signal.`,
-              effectType: existingEntry.effectType ?? "report",
-              effectEvidence:
-                existingEntry.effectEvidence ??
-                `superseded_by:${workId}`,
-              externalStatus: existingEntry.externalStatus ?? "pending",
-              externalEvidenceType: existingEntry.externalEvidenceType ?? "text",
-              externalEvidenceValue:
-                existingEntry.externalEvidenceValue ??
-                `superseded_by:${workId}`,
-              updatedAt: ts,
-            },
-            env,
-          );
-        }
-      }
-      if (
-        task.workType === "external_publish" &&
-        wasGenesisTrafficPublishedRecentlySync({
-          platform: account.platform,
-          fingerprint: trafficFingerprint,
-          env,
-        })
-      ) {
-        releaseGenesisPlatformAccountSync({
-          recordId: account.recordId,
-          lastOutcome: `duplicate_skipped:${trafficFingerprint ?? "none"}`,
-          env,
-        });
-        continue;
-      }
-      appendGenesisProactiveWorkEntrySync(
-        nextEntry,
-        env,
-      );
+        requestedBy: founderOrigin,
+        preference,
+        candidatePlatform,
+        lineageDepth: 0,
+      });
+    }
+  }
+
+  const childCandidates = resolveChildLineageExternalExecutionCandidatesSync({
+    env,
+    context,
+    world,
+    ts,
+  });
+  for (const candidate of childCandidates) {
+    const preference = resolveFounderExternalExecutionPreference({
+      founderOrigin: candidate.founderOrigin,
+      context,
+    });
+    if (!preference) {
+      continue;
+    }
+    const candidatePlatforms = resolveExternalExecutionCandidatePlatforms({
+      founderOrigin: candidate.founderOrigin,
+      preference,
+      context,
+      loginSummary,
+    });
+    for (const candidatePlatform of candidatePlatforms) {
+      const workId = `lineage-account:${slotKey}:${encodeURIComponent(candidate.lineageId)}:${
+        candidatePlatform ?? "any"
+      }:${preference.capability}`;
+      tryScheduleExternalEntry({
+        workId,
+        founderOrigin: candidate.founderOrigin,
+        lineageId: candidate.lineageId,
+        sessionKey: candidate.latestSessionKey || `agent:${candidate.founderOrigin}:main`,
+        requestedBy: `${candidate.founderOrigin}:${candidate.lineageId}`,
+        preference,
+        candidatePlatform,
+        lineageDepth: candidate.depth,
+      });
     }
   }
 }

@@ -133,6 +133,15 @@ function resolveExternalExecutionPriority(entry: GenesisProactiveWorkEntry): num
   if ((entry.task ?? "").match(/https?:\/\//i)) {
     score += 2;
   }
+  const lineageId = entry.lineageId ?? "";
+  if (lineageId.includes("::workflow::")) {
+    score += 2;
+    const generationDepth = Math.max(1, lineageId.split("::workflow::").length - 1);
+    score += Math.min(4, generationDepth) * 1.5;
+  }
+  if (entry.status === "in_progress") {
+    score += 1;
+  }
   return score;
 }
 

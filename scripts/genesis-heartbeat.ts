@@ -51,6 +51,18 @@ function parseArgs(argv: string[]): ParsedArgs {
   return { trigger, stateDir };
 }
 
+function resolvePendingExternalEntryCount(env: NodeJS.ProcessEnv): number {
+  refreshGenesisProactiveWorkSummarySnapshotSync(env);
+  const summary = readGenesisSocietySummarySync(env);
+  return (
+    summary.proactiveWorkSummary?.recentEntries?.filter(
+      (entry) =>
+        (entry.status === "planned" || entry.status === "in_progress") &&
+        entry.workType.startsWith("external_"),
+    ).length ?? 0
+  );
+}
+
 async function runStableExternalExecution(params: {
   trigger: "heartbeat" | "cron";
   env: NodeJS.ProcessEnv;
@@ -61,8 +73,13 @@ async function runStableExternalExecution(params: {
     failed: 0,
     passes: 0,
   };
-  const maxEntries = params.trigger === "cron" ? 4 : 3;
-  const maxPasses = params.trigger === "cron" ? 3 : 2;
+  const baseEntries = params.trigger === "cron" ? 4 : 3;
+  const basePasses = params.trigger === "cron" ? 3 : 2;
+  const pendingAtStart = resolvePendingExternalEntryCount(params.env);
+  const backlogEntryBoost = pendingAtStart >= 14 ? 4 : pendingAtStart >= 8 ? 3 : pendingAtStart >= 4 ? 1 : 0;
+  const backlogPassBoost = pendingAtStart >= 14 ? 2 : pendingAtStart >= 8 ? 1 : 0;
+  const maxEntries = baseEntries + backlogEntryBoost;
+  const maxPasses = basePasses + backlogPassBoost;
 
   for (let pass = 0; pass < maxPasses; pass += 1) {
     const result = await runGenesisExternalExecutionCycle({
@@ -76,6 +93,13 @@ async function runStableExternalExecution(params: {
 
     refreshGenesisProactiveWorkSummarySnapshotSync(params.env);
     const summary = readGenesisSocietySummarySync(params.env);
+    const pendingAfterPass =
+      summary.proactiveWorkSummary?.recentEntries?.filter(
+        (entry) =>
+          (entry.status === "planned" || entry.status === "in_progress") &&
+          entry.workType.startsWith("external_"),
+      ).length ?? 0;
+    const hasBacklogPressure = pendingAfterPass >= Math.max(2, Math.floor(maxEntries * 0.75));
     const hasCreatorPublishPending = Boolean(
       summary.proactiveWorkSummary?.recentEntries?.some(
         (entry) =>
@@ -88,10 +112,10 @@ async function runStableExternalExecution(params: {
     if (result.attempted === 0) {
       break;
     }
-    if (!hasCreatorPublishPending && result.completed === 0) {
+    if (!hasBacklogPressure && !hasCreatorPublishPending && result.completed === 0) {
       break;
     }
-    if (!hasCreatorPublishPending && result.failed === 0) {
+    if (!hasBacklogPressure && !hasCreatorPublishPending && result.failed === 0) {
       break;
     }
   }

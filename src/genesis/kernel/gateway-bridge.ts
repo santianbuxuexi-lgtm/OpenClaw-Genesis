@@ -379,7 +379,7 @@ function appendGenesisWorkflowProactiveWork(params: {
   const founderOrigin = params.founderOrigin as (typeof KNOWN_FOUNDER_AGENT_IDS extends Set<infer T> ? T : never);
   const proactiveTask =
     params.lineageId.includes("::workflow::") || params.lineageId.includes("::child:")
-      ? buildGenesisChildWorkflowTask(founderOrigin)
+      ? buildGenesisCompactChildWorkflowTask(founderOrigin)
       : buildGenesisProactiveWorkTask({
           founderOrigin,
           climateKind: params.climateKind,
@@ -431,6 +431,40 @@ function buildGenesisChildWorkflowTask(
         workType: "coordination",
         task: "只完成 1 次平台或责任分配决策，并明确下一步归属",
       };
+  }
+}
+
+function buildGenesisCompactChildWorkflowTask(
+  founderOrigin: (typeof KNOWN_FOUNDER_AGENT_IDS extends Set<infer T> ? T : never),
+): { workType: string; task: string } {
+  switch (founderOrigin) {
+    case "scout":
+      return {
+        workType: "intelligence",
+        task: "Add exactly one high-confidence hotspot signal and one directly usable clue brief.",
+      };
+    case "builder":
+      return {
+        workType: "tooling",
+        task: "Close exactly one minimum tooling or execution gap for the current chain.",
+      };
+    case "creator":
+      return {
+        workType: "synthesis",
+        task: "Deliver exactly one closable short commentary or publish draft, avoid long plans.",
+      };
+    case "auditor":
+      return {
+        workType: "audit",
+        task: "Verify exactly one core risk point and give a clear pass-or-block verdict.",
+      };
+    case "negotiator":
+      return {
+        workType: "coordination",
+        task: "Make exactly one platform or ownership decision and name the next owner.",
+      };
+    default:
+      return buildGenesisChildWorkflowTask(founderOrigin);
   }
 }
 
@@ -591,24 +625,63 @@ function resolveWorkflowReplicationSeedScore(
 function resolveWorkflowReplicationRecentChildCooldownMs(
   profile: ReturnType<typeof readGenesisExperimentProfileSync>,
   payload: GenesisWorkflowDispatchRecord,
+  world: GenesisWorldState | null,
 ): number {
   const baseCooldownMs = Math.max(60_000, profile.workflowReplicationRecentChildCooldownMs);
+  const pressure = Math.max(0, world?.currentPressure ?? 0);
+  const stormMomentum = Math.max(0, world?.stormMomentum ?? 0);
+  const replicationBoost = Math.max(0, world?.replicationBoost ?? 0);
+  const intensityRelax = payload.intensity >= 1 ? 0.5 : payload.intensity >= 0.85 ? 0.65 : 0.8;
+  const pressureRelax =
+    pressure >= profile.stressedSpawnHighPressureThreshold
+      ? 0.55
+      : pressure >= profile.stressedSpawnZeroQuotaThreshold
+        ? 0.75
+        : 1;
+  const stormRelax = stormMomentum >= 1.5 ? 0.8 : stormMomentum >= 1.1 ? 0.9 : 1;
+  const boostRelax = replicationBoost >= 1.4 ? 0.65 : replicationBoost >= 1.1 ? 0.82 : 1;
+  const adaptiveBase = Math.max(
+    45_000,
+    Math.floor(baseCooldownMs * intensityRelax * pressureRelax * stormRelax * boostRelax),
+  );
   if (payload.climateKind === "command") {
-    return Math.max(60_000, Math.floor(baseCooldownMs * 0.35));
+    return Math.max(40_000, Math.floor(adaptiveBase * 0.55));
   }
   if (
     payload.climateKind === "search" ||
     payload.climateKind === "query" ||
     payload.climateKind === "consultation"
   ) {
-    return Math.max(120_000, Math.floor(baseCooldownMs * 0.5));
+    return Math.max(60_000, Math.floor(adaptiveBase * 0.75));
   }
-  return baseCooldownMs;
+  return adaptiveBase;
+}
+
+function resolveWorkflowReplicationRecentChildQuota(
+  profile: ReturnType<typeof readGenesisExperimentProfileSync>,
+  payload: GenesisWorkflowDispatchRecord,
+  world: GenesisWorldState | null,
+): number {
+  let quota = 1;
+  if (payload.climateKind === "command") {
+    quota += 1;
+  }
+  if (payload.intensity >= profile.workflowReplicationSeedIntensityBonusThreshold) {
+    quota += 1;
+  }
+  if ((world?.currentPressure ?? 0) >= profile.stressedSpawnHighPressureThreshold) {
+    quota += 1;
+  }
+  if ((world?.replicationBoost ?? 0) >= 1.25) {
+    quota += 1;
+  }
+  return Math.max(1, Math.min(quota, 5));
 }
 
 function resolveWorkflowReplicationSeedLimit(
   profile: ReturnType<typeof readGenesisExperimentProfileSync>,
   payload: GenesisWorkflowDispatchRecord,
+  world: GenesisWorldState | null,
 ): number {
   let limit = Math.max(1, profile.workflowReplicationSeedBaseCount);
   if (
@@ -623,6 +696,15 @@ function resolveWorkflowReplicationSeedLimit(
   if (payload.intensity >= profile.workflowReplicationSeedIntensityBonusThreshold) {
     limit += Math.max(0, profile.workflowReplicationSeedIntensityBonus);
   }
+  if ((world?.currentPressure ?? 0) >= profile.stressedSpawnHighPressureThreshold) {
+    limit += 1;
+  }
+  if ((world?.replicationBoost ?? 0) >= 1.2) {
+    limit += 1;
+  }
+  if ((world?.stormMomentum ?? 0) >= 1.45 && payload.climateKind === "command") {
+    limit += 1;
+  }
   return Math.max(1, limit);
 }
 
@@ -636,8 +718,14 @@ async function seedWorkflowReplicationChild(params: {
   }
   const profile = readGenesisExperimentProfileSync(process.env);
   const existingLineages = await readGenesisLineageDirectoryRecords();
+  const maxRecentChildrenPerParent = resolveWorkflowReplicationRecentChildQuota(
+    profile,
+    params.payload,
+    params.world,
+  );
   const recentCutoffTs =
-    params.payload.updatedAt - resolveWorkflowReplicationRecentChildCooldownMs(profile, params.payload);
+    params.payload.updatedAt -
+    resolveWorkflowReplicationRecentChildCooldownMs(profile, params.payload, params.world);
   const recordsById = new Map(existingLineages.map((record) => [record.lineageId, record] as const));
   const lineageChildren = new Map<string, GenesisLineageRecord[]>();
   for (const record of existingLineages) {
@@ -675,13 +763,29 @@ async function seedWorkflowReplicationChild(params: {
           return rightScore - leftScore || right.updatedAt - left.updatedAt;
         });
       const branchParent = healthyDescendants
-        .filter((record) => (record.completionCount ?? 0) > 0)
+        .filter((record) => {
+          if ((record.completionCount ?? 0) > 0) {
+            return true;
+          }
+          if (
+            params.payload.climateKind === "command" &&
+            params.payload.intensity >= Math.max(0.9, profile.workflowReplicationSeedIntensityBonusThreshold)
+          ) {
+            const lineageMomentum =
+              Math.max(0, record.publicValue) +
+              Math.max(0, record.survivalCredit) +
+              Math.max(0, record.expansionCredit);
+            return lineageMomentum >= 0.9;
+          }
+          return false;
+        })
         .find((record) => {
-          return !existingLineages.some(
+          const recentChildren = existingLineages.filter(
             (candidateChild) =>
               candidateChild.parentLineageId === record.lineageId &&
               candidateChild.updatedAt >= recentCutoffTs,
           );
+          return recentChildren.length < maxRecentChildrenPerParent;
         });
       if (!branchParent && candidate.completionCount <= 0) {
         return null;
@@ -718,12 +822,12 @@ async function seedWorkflowReplicationChild(params: {
             chainDepth: 0,
             chainBonus: 0,
           };
-      const alreadyHasRecentChild = existingLineages.some(
+      const recentChildrenForSeedParent = existingLineages.filter(
         (record) =>
           record.parentLineageId === seedParent.lineageId &&
           record.updatedAt >= recentCutoffTs,
       );
-      if (alreadyHasRecentChild) {
+      if (recentChildrenForSeedParent.length >= maxRecentChildrenPerParent) {
         return null;
       }
       return {
@@ -745,7 +849,10 @@ async function seedWorkflowReplicationChild(params: {
   );
   const selectedSeeds = selectedCandidates.slice(
     0,
-    Math.min(selectedCandidates.length, resolveWorkflowReplicationSeedLimit(profile, params.payload)),
+    Math.min(
+      selectedCandidates.length,
+      resolveWorkflowReplicationSeedLimit(profile, params.payload, params.world),
+    ),
   );
   if (selectedSeeds.length === 0) {
     return;
@@ -792,7 +899,7 @@ async function seedWorkflowReplicationChild(params: {
         : selected.runtimeProfile
           ? { runtimeProfile: selected.runtimeProfile }
           : {}),
-      latestSessionKey: `${selected.seedParent.latestSessionKey}::child:${index}`,
+      latestSessionKey: `${selected.seedParent.latestSessionKey}::child:${params.payload.updatedAt}:${index}`,
       completionCount: 0,
       lastCompletionTs: params.payload.updatedAt,
       lastReason: "workflow_seed",
