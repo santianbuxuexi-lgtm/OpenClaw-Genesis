@@ -1,17 +1,20 @@
 import fs from "node:fs";
 import path from "node:path";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 
-const STATE_DIR = "/root/.openclaw-genesis";
+const STATE_DIR =
+  process.env.OPENCLAW_GENESIS_STATE_DIR?.trim() ||
+  process.env.OPENCLAW_STATE_DIR?.trim() ||
+  "/root/.openclaw-genesis";
 const GENESIS_DIR = path.join(STATE_DIR, "genesis");
-const GENESIS_APP_DIR = "/opt/openclaw-genesis";
+const GENESIS_APP_DIR = process.env.OPENCLAW_GENESIS_SCRIPT_DIR?.trim() || "/opt/openclaw-genesis";
+const GENESIS_TASK_CONFIG_PATH =
+  process.env.OPENCLAW_GENESIS_TASK_CONFIG_PATH?.trim() ||
+  path.join(STATE_DIR, "genesis-task-config.json");
+const GENESIS_GATEWAY_CONFIG_PATH = path.join(STATE_DIR, "openclaw.json");
 const ENTRY_AGENT = "negotiator";
 const ENTRY_SESSION = "agent:negotiator:main";
 const FOUNDER_IDS = ["negotiator", "builder", "creator", "auditor", "scout"];
-
-function zh(text) {
-  return text;
-}
 
 function readStdinJson() {
   const raw = fs.readFileSync(0, "utf8").trim();
@@ -30,34 +33,73 @@ function normalize(text) {
   return (text ?? "").trim().toLowerCase().replace(/\s+/g, "");
 }
 
-function looksLikeStatusQuery(body) {
+function resolveBuiltinQueryKind(body) {
   const text = normalize(body);
-  const tokens = [
-    "founder",
-    "\u6210\u5458",
-    "\u590d\u5236",
-    "\u7e41\u884d",
-    "\u751f\u6001",
-    "\u56e2\u961f",
-    "\u72b6\u6001",
-    "\u72b6\u51b5",
-    "\u8c01\u5728\u5de5\u4f5c",
-    "\u591a\u5c11agent",
-    "\u591a\u5c11\u6210\u5458",
-    "\u591a\u5c11founder",
-    "progress",
-  ];
-  return body.startsWith("/") || tokens.some((token) => text.includes(token));
+  if (!text) {
+    return "greeting";
+  }
+  const greetingTokens = new Set([
+    "hi",
+    "hello",
+    "你好",
+    "在吗",
+    "在么",
+    "在不在",
+  ]);
+  if (greetingTokens.has(text)) {
+    return "greeting";
+  }
+  if (!text.startsWith("/")) {
+    if (
+      text.includes("超能力") ||
+      text.includes("特长") ||
+      text.includes("擅长什么") ||
+      text.includes("能做什么")
+    ) {
+      return "capability";
+    }
+    if (
+      text.includes("多少agent") ||
+      text.includes("多少founder") ||
+      text.includes("多少成员") ||
+      text.includes("有多少agent") ||
+      text.includes("有多少founder") ||
+      text.includes("有多少成员") ||
+      text.includes("为什么没有复制") ||
+      text.includes("为什么没有繁衍") ||
+      text.includes("复制到多少") ||
+      text.includes("繁衍到多少")
+    ) {
+      return "status";
+    }
+    return null;
+  }
+  const statusCommands = new Set([
+    "/progress",
+    "/status",
+    "/genesis",
+    "/genesisstatus",
+    "/genesis/status",
+  ]);
+  if (statusCommands.has(text)) {
+    return "status";
+  }
+  const capabilityCommands = new Set([
+    "/capability",
+    "/genesiscapability",
+    "/genesis/capability",
+  ]);
+  if (capabilityCommands.has(text)) {
+    return "capability";
+  }
+  return null;
 }
 
-function looksLikeCapabilityQuery(body) {
-  const text = normalize(body);
-  return (
-    text.includes("\u8d85\u80fd\u529b") ||
-    text.includes("\u7279\u957f") ||
-    text.includes("\u64c5\u957f\u4ec0\u4e48") ||
-    text.includes("\u80fd\u505a\u4ec0\u4e48")
-  );
+function buildGreetingReply() {
+  return [
+    "Genesis 在，通道正常。",
+    "你可以直接给任务，我会走 founder 协作给出结果；如果你要看状态，用 `/progress`。",
+  ].join("\n");
 }
 
 function getLatestFounderPlan(dispatch) {
@@ -97,47 +139,47 @@ function buildStatusReply() {
           .slice(0, 2)
           .map((entry) => {
             const owner = entry.founderOrigin?.trim() || entry.founderId?.trim() || "unknown";
-            return `${owner}${entry.platform ? ` [${entry.platform}]` : ""}\uff1a${entry.task}`;
+            return `${owner}${entry.platform ? ` [${entry.platform}]` : ""}：${entry.task}`;
           })
           .join("\n")
-      : zh("\u5f53\u524d\u8fd8\u6ca1\u6709\u660e\u786e\u5728\u63a8\u8fdb\u7684\u516c\u5f00\u4efb\u52a1\u3002");
+      : "当前还没有明确在推进的公开任务。";
 
   const publicOutput =
     Array.isArray(proactive?.recentEntries) && proactive.recentEntries.length > 0
       ? proactive.recentEntries
           .filter((entry) => entry.status === "completed" && entry.workType === "external_publish")
           .slice(0, 1)
-          .map((entry) => `${entry.platform ?? "unknown"}\uff1a${entry.contentPreview ?? entry.task}`)
+          .map((entry) => `${entry.platform ?? "unknown"}：${entry.contentPreview ?? entry.task}`)
           .join("\n")
-      : zh("\u6700\u8fd1\u8fd8\u6ca1\u6709\u65b0\u7684\u516c\u5f00\u6210\u679c\u3002");
+      : "最近还没有新的公开成果。";
 
   return [
-    zh("Genesis \u73b0\u5728\u5728\u7ebf\uff0c\u6211\u6309\u72ec\u7acb\u72b6\u6001\u76ee\u5f55\u91cc\u7684 live \u6570\u636e\u544a\u8bc9\u4f60\u3002"),
-    `\u5f53\u524d\u603b\u6210\u5458 ${lineage.lineageCount ?? 0}\uff0c\u5176\u4e2d founder \u89d2\u8272 5 \u4e2a\uff0cchild ${lineage.childLineageCount ?? 0}\uff0c\u4e8c\u4ee3 ${lineage.secondGenerationChildCount ?? 0}\uff0c\u4e09\u4ee3 ${lineage.thirdGenerationChildCount ?? 0}\u3002`,
+    "Genesis 现在在线，我按独立状态目录里的 live 数据告诉你。",
+    `当前总成员 ${lineage.lineageCount ?? 0}，其中 founder 角色 5 个，child ${lineage.childLineageCount ?? 0}，二代 ${lineage.secondGenerationChildCount ?? 0}，三代 ${lineage.thirdGenerationChildCount ?? 0}。`,
     latestPlan
-      ? `\u5f53\u524d\u5df2\u5f62\u6210 founder \u534f\u4f5c\uff1a${latestPlan.primaryAgentId} \u7275\u5934\uff0c\u534f\u4f5c\u6210\u5458 ${support.length > 0 ? support.join("\u3001") : "\u6682\u672a\u5f62\u6210"}\u3002`
-      : zh("\u5f53\u524d\u8fd8\u6ca1\u6709\u5f62\u6210\u7a33\u5b9a\u7684 founder \u534f\u4f5c\u8c03\u5ea6\u3002"),
-    `\u773c\u4e0b\u6700\u660e\u663e\u7684\u5de5\u4f5c\uff1a\n${currentWork}`,
-    `\u6700\u8fd1\u516c\u5f00\u6210\u679c\uff1a\n${publicOutput}`,
+      ? `当前已形成 founder 协作：${latestPlan.primaryAgentId} 牵头，协作成员 ${support.length > 0 ? support.join("、") : "暂未形成"}。`
+      : "当前还没有形成稳定的 founder 协作调度。",
+    `眼下最明显的工作：\n${currentWork}`,
+    `最近公开成果：\n${publicOutput}`,
   ].join("\n\n");
 }
 
 function buildCapabilityReply() {
   return [
-    "\u5982\u679c\u4f60\u95ee\u7684\u662f Genesis \u7684\u300c\u8d85\u80fd\u529b\u300d\u548c\u300c\u7279\u957f\u300d\uff0c\u6211\u4eec\u73b0\u5728\u7684\u5206\u5de5\u662f\u8fd9\u6837\uff1a",
-    "\u00b7 negotiator\uff1a\u8d1f\u8d23\u63a5\u5355\u3001\u534f\u8c03 founder\uff0c\u628a\u4efb\u52a1\u53d8\u6210\u53ef\u6267\u884c\u7684\u63a8\u8fdb\u8def\u7ebf\u3002",
-    "\u00b7 scout\uff1a\u64c5\u957f\u641c\u7d22\u3001\u8ddf\u8e2a\u70ed\u70b9\u3001\u62c9\u53d6\u4fe1\u53f7\u548c\u60c5\u62a5\u7ebf\u7d22\u3002",
-    "\u00b7 creator\uff1a\u64c5\u957f\u628a\u4fe1\u606f\u53d8\u6210\u5185\u5bb9\uff0c\u5305\u62ec\u8bc4\u8bba\u3001\u6458\u8981\u3001\u5fae\u535a/\u5fae\u5934\u6761\u7b49\u5916\u53d1\u6587\u6848\u3002",
-    "\u00b7 auditor\uff1a\u8d1f\u8d23\u6838\u5bf9\u3001\u68c0\u67e5\u98ce\u9669\u3001\u538b\u4f4e\u80e1\u8bf4\u548c\u91cd\u590d\u8f93\u51fa\u3002",
-    "\u00b7 builder\uff1a\u8d1f\u8d23\u8865 skill\u3001\u8865\u5de5\u5177\u3001\u6253\u901a\u63a5\u53e3\u548c\u7ef4\u62a4\u8fd0\u884c\u94fe\u8def\u3002",
+    "如果你问的是 Genesis 的「超能力」和「特长」，我们现在的分工是这样：",
+    "· negotiator：负责接单、协调 founder，把任务变成可执行的推进路线。",
+    "· scout：擅长搜索、跟踪热点、拉取信号和情报线索。",
+    "· creator：擅长把信息变成内容，包括评论、摘要、微博/微头条等外发文案。",
+    "· auditor：负责核对、检查风险、压低胡说和重复输出。",
+    "· builder：负责补 skill、补工具、打通接口和维护运行链路。",
     "",
-    "\u5bf9\u5916\u770b\uff0cGenesis \u73b0\u5728\u6700\u5f3a\u7684\u51e0\u7c7b\u80fd\u529b\u662f\uff1a",
-    "\u00b7 \u70ed\u70b9\u641c\u7d22\u4e0e\u6c47\u603b",
-    "\u00b7 \u4efb\u52a1\u534f\u8c03\u4e0e founder \u5206\u5de5",
-    "\u00b7 \u5185\u5bb9\u7ec4\u7ec7\u548c\u5bf9\u5916\u8f93\u51fa",
-    "\u00b7 \u8fd0\u884c\u72b6\u6001\u548c\u7e41\u884d/\u6269\u5f20\u89c6\u56fe",
+    "对外看，Genesis 现在最强的几类能力是：",
+    "· 热点搜索与汇总",
+    "· 任务协调与 founder 分工",
+    "· 内容组织和对外输出",
+    "· 运行状态和繁衍/扩张视图",
     "",
-    "\u4f60\u8981\u662f\u613f\u610f\uff0c\u6211\u53ef\u4ee5\u76f4\u63a5\u6309\u8fd9\u4e9b\u80fd\u529b\u66ff\u4f60\u5206\u5de5\u5e72\u6d3b\uff0c\u800c\u4e0d\u53ea\u662f\u89e3\u91ca\u7ed9\u4f60\u542c\u3002",
+    "你要是愿意，我可以直接按这些能力替你分工干活，而不只是解释给你听。",
   ].join("\n");
 }
 
@@ -151,10 +193,98 @@ function appendInboxEvent(input) {
     sessionKey: input.sessionKey ?? null,
     accountId: input.accountId ?? "genesis",
     senderLabel: input.senderLabel ?? null,
+    senderId: input.senderId ?? null,
     threadLabel: input.threadLabel ?? null,
+    messageThreadId: input.messageThreadId ?? null,
     messageId: input.messageId ?? null,
+    requestId: input.requestId ?? null,
   };
   fs.appendFileSync(inboxPath, `${JSON.stringify(record)}\n`, "utf8");
+}
+
+function normalizeDeliverTarget(senderId) {
+  if (typeof senderId !== "string") {
+    return null;
+  }
+  const trimmed = senderId.trim();
+  if (!trimmed) {
+    return null;
+  }
+  if (trimmed.startsWith("qqbot:")) {
+    return trimmed;
+  }
+  return `qqbot:c2c:${trimmed}`;
+}
+
+function buildAcceptedReply() {
+  return "Genesis 已接单，正在调动 founder 协作处理；最终结果会作为下一条消息发回。";
+}
+
+function launchDetachedTask(input) {
+  const deliverTo = normalizeDeliverTarget(input.senderId);
+  if (!deliverTo) {
+    throw new Error("Genesis 独立通道缺少可回写的 QQ senderId");
+  }
+
+  const requestId = `genesis-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const logPath = path.join(GENESIS_DIR, "channel-worker.log");
+  fs.mkdirSync(GENESIS_DIR, { recursive: true });
+  appendInboxEvent({ ...input, requestId });
+
+  const logFd = fs.openSync(logPath, "a");
+  const child = spawn(
+    "./node_modules/.bin/tsx",
+    [
+      "scripts/genesis-run-task.ts",
+      "--state-dir",
+      STATE_DIR,
+      "--channel",
+      "qqbot:genesis",
+      "--account",
+      input.accountId ?? "genesis",
+      "--agent",
+      ENTRY_AGENT,
+      "--session",
+      ENTRY_SESSION,
+      "--thread",
+      input.sessionKey?.trim() || `qqbot:genesis:${Date.now()}`,
+      "--candidates",
+      FOUNDER_IDS.join(","),
+      "--message",
+      input.body ?? "",
+      "--request",
+      requestId,
+      "--deliver-channel",
+      "qqbot",
+      "--deliver-to",
+      deliverTo,
+      "--deliver-account",
+      input.accountId ?? "genesis",
+      "--deliver-session",
+      input.sessionKey?.trim() || ENTRY_SESSION,
+    ],
+    {
+      cwd: GENESIS_APP_DIR,
+      detached: true,
+      stdio: ["ignore", logFd, logFd],
+      env: {
+        ...process.env,
+        HOME: STATE_DIR,
+        NODE_OPTIONS: [
+          process.env.NODE_OPTIONS?.trim(),
+          "--max-old-space-size=4096",
+        ]
+          .filter(Boolean)
+          .join(" "),
+        OPENCLAW_STATE_DIR: STATE_DIR,
+        OPENCLAW_GENESIS_STATE_DIR: STATE_DIR,
+        OPENCLAW_CONFIG_PATH: GENESIS_TASK_CONFIG_PATH,
+        OPENCLAW_DELIVERY_CONFIG_PATH: GENESIS_GATEWAY_CONFIG_PATH,
+      },
+    },
+  );
+  child.unref();
+  fs.closeSync(logFd);
 }
 
 function runTask(input) {
@@ -194,7 +324,7 @@ function runTask(input) {
           .join(" "),
         OPENCLAW_STATE_DIR: STATE_DIR,
         OPENCLAW_GENESIS_STATE_DIR: STATE_DIR,
-        OPENCLAW_CONFIG_PATH: "/root/.openclaw-genesis/openclaw.json",
+        OPENCLAW_CONFIG_PATH: GENESIS_TASK_CONFIG_PATH,
       },
     },
   );
@@ -249,23 +379,24 @@ function extractBalancedJson(text) {
 }
 
 function buildTaskReply(result) {
-  return result?.payload?.text?.trim() || zh("Genesis \u5df2\u6536\u5230\u4efb\u52a1\uff0c\u4f46\u8fd9\u4e00\u8f6e\u6ca1\u6709\u5f62\u6210\u53ef\u89c1\u56de\u590d\u3002");
+  return result?.payload?.text?.trim() || "Genesis 已收到任务，但这一轮没有形成可见回复。";
 }
 
 function buildTaskFailure(input, error) {
   appendInboxEvent(input);
+  const message = error instanceof Error ? error.message : String(error);
   return [
-    zh("Genesis \u5df2\u6536\u5230\u8fd9\u6761\u6d88\u606f\uff0c\u4f46\u8fd9\u8f6e\u4efb\u52a1\u6267\u884c\u6ca1\u6709\u8dd1\u901a\u3002"),
-    zh("\u6211\u5148\u628a\u6d88\u606f\u5199\u8fdb\u4e86 Genesis inbox\uff0c\u4e0d\u5047\u88c5\u5df2\u7ecf\u5b8c\u6210\u3002"),
-    `${zh("\u9519\u8bef")}: ${error instanceof Error ? error.message : String(error)}`,
+    "这轮没有顺利跑通，我还没拿到可以直接给你的结果。",
+    `错误: ${message}`,
   ].join("\n");
 }
 
 function main() {
   const input = readStdinJson();
   const body = input.body?.trim() || "";
+  const builtinKind = resolveBuiltinQueryKind(body);
 
-  if (looksLikeCapabilityQuery(body)) {
+  if (builtinKind === "capability") {
     process.stdout.write(
       JSON.stringify({
         ok: true,
@@ -276,7 +407,7 @@ function main() {
     return;
   }
 
-  if (looksLikeStatusQuery(body)) {
+  if (builtinKind === "status") {
     process.stdout.write(
       JSON.stringify({
         ok: true,
@@ -285,6 +416,33 @@ function main() {
       }),
     );
     return;
+  }
+
+  if (builtinKind === "greeting") {
+    process.stdout.write(
+      JSON.stringify({
+        ok: true,
+        kind: "greeting",
+        payload: { text: buildGreetingReply() },
+      }),
+    );
+    return;
+  }
+
+  if (normalizeDeliverTarget(input.senderId)) {
+    try {
+      launchDetachedTask(input);
+      process.stdout.write(
+        JSON.stringify({
+          ok: true,
+          kind: "task-accepted",
+          payload: { text: buildAcceptedReply() },
+        }),
+      );
+      return;
+    } catch {
+      // Fall through to the synchronous path if detached execution cannot be scheduled.
+    }
   }
 
   try {
